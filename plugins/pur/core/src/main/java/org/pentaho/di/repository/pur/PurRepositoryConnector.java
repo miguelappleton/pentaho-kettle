@@ -62,6 +62,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 public class PurRepositoryConnector implements IRepositoryConnector {
@@ -152,6 +153,12 @@ public class PurRepositoryConnector implements IRepositoryConnector {
         }
       }
 
+      // Do the repo connect call in a separate executor from the remaining three,
+      // To ensure that if it fails, the remaining calls are not performed
+      repoWebServiceConnect( username, urlEncodedPassword, result );
+
+      syncWebService( username, urlEncodedPassword, result );
+
       ExecutorService executor = getExecutor();
 
       Future<Boolean> authorizationWebserviceFuture = executor.submit( new Callable<Boolean>() {
@@ -185,59 +192,6 @@ public class PurRepositoryConnector implements IRepositoryConnector {
         }
       } );
 
-      Future<WebServiceException> repoWebServiceFuture = executor.submit( new Callable<WebServiceException>() {
-
-        @Override
-        public WebServiceException call() throws Exception {
-          try {
-            IUnifiedRepositoryJaxwsWebService repoWebService = null;
-            if ( log.isBasic() ) {
-              log.logBasic( BaseMessages.getString( PKG, "PurRepositoryConnector.CreateRepositoryWebService.Start" ) ); //$NON-NLS-1$
-            }
-            repoWebService =
-                serviceManager.createService( username, urlEncodedPassword, IUnifiedRepositoryJaxwsWebService.class ); //$NON-NLS-1$
-            if ( log.isBasic() ) {
-              log.logBasic( BaseMessages.getString( PKG, "PurRepositoryConnector.CreateRepositoryWebService.End" ) ); //$NON-NLS-1$
-            }
-            if ( log.isBasic() ) {
-              log.logBasic( BaseMessages.getString( PKG, "PurRepositoryConnector.CreateUnifiedRepositoryToWebServiceAdapter.Start" ) ); //$NON-NLS-1$
-            }
-            result.setUnifiedRepository( new UnifiedRepositoryToWebServiceAdapter( repoWebService ) );
-          } catch ( WebServiceException wse ) {
-            return wse;
-          }
-          return null;
-        }
-      } );
-
-      Future<Exception> syncWebserviceFuture = executor.submit( new Callable<Exception>() {
-
-        @Override
-        public Exception call() throws Exception {
-          try {
-            if ( log.isBasic() ) {
-              log.logBasic( BaseMessages.getString( PKG, "PurRepositoryConnector.CreateRepositorySyncWebService.Start" ) );
-            }
-            IRepositorySyncWebService syncWebService =
-                serviceManager.createService( username, urlEncodedPassword, IRepositorySyncWebService.class ); //$NON-NLS-1$
-            if ( log.isBasic() ) {
-              log.logBasic( BaseMessages.getString( PKG, "PurRepositoryConnector.CreateRepositorySyncWebService.Sync" ) ); //$NON-NLS-1$
-            }
-            syncWebService.sync( repositoryMeta.getName(), repositoryMeta.getRepositoryLocation().getUrl() );
-          } catch ( RepositorySyncException e ) {
-            log.logError( e.getMessage(), e );
-            // this message will be presented to the user in spoon
-            result.setConnectMessage( e.getMessage() );
-            return null;
-          } catch ( WebServiceException e ) {
-            // if we can speak to the repository okay but not the sync service, assume we're talking to a BA Server
-            log.logError( e.getMessage(), e );
-            return new Exception( BaseMessages.getString( PKG, "PurRepository.BAServerLogin.Message" ), e );
-          }
-          return null;
-        }
-      } );
-
       Future<String> sessionServiceFuture = executor.submit( new Callable<String>() {
 
         @Override
@@ -267,17 +221,6 @@ public class PurRepositoryConnector implements IRepositoryConnector {
           }
         }
       } );
-
-      WebServiceException repoException = repoWebServiceFuture.get();
-      if ( repoException != null ) {
-        log.logError( repoException.getMessage() );
-        throw new Exception( BaseMessages.getString( PKG, "PurRepository.FailedLogin.Message" ), repoException );
-      }
-
-      Exception syncException = syncWebserviceFuture.get();
-      if ( syncException != null ) {
-        throw syncException;
-      }
 
       Boolean isAdmin = authorizationWebserviceFuture.get();
       result.getUser().setAdmin( isAdmin );
@@ -327,6 +270,88 @@ public class PurRepositoryConnector implements IRepositoryConnector {
       throw new KettleException( e );
     }
     return result;
+  }
+
+  private void repoWebServiceConnect( String username, String urlEncodedPassword, RepositoryConnectResult result )
+    throws Exception {
+    ExecutorService executor = Executors.newFixedThreadPool(1);
+
+    try{
+      Future<WebServiceException> repoWebServiceFuture = executor.submit( new Callable<WebServiceException>() {
+
+        @Override
+        public WebServiceException call() throws Exception {
+          try {
+            IUnifiedRepositoryJaxwsWebService repoWebService = null;
+            if ( log.isBasic() ) {
+              log.logBasic( BaseMessages.getString( PKG, "PurRepositoryConnector.CreateRepositoryWebService.Start" ) ); //$NON-NLS-1$
+            }
+            repoWebService =
+              serviceManager.createService( username, urlEncodedPassword, IUnifiedRepositoryJaxwsWebService.class ); //$NON-NLS-1$
+            if ( log.isBasic() ) {
+              log.logBasic( BaseMessages.getString( PKG, "PurRepositoryConnector.CreateRepositoryWebService.End" ) ); //$NON-NLS-1$
+            }
+            if ( log.isBasic() ) {
+              log.logBasic( BaseMessages.getString( PKG, "PurRepositoryConnector.CreateUnifiedRepositoryToWebServiceAdapter.Start" ) ); //$NON-NLS-1$
+            }
+            result.setUnifiedRepository( new UnifiedRepositoryToWebServiceAdapter( repoWebService ) );
+          } catch ( WebServiceException wse ) {
+            return wse;
+          }
+          return null;
+        }
+      } );
+
+      WebServiceException repoException = repoWebServiceFuture.get();
+      if ( repoException != null ) {
+        log.logError( repoException.getMessage() );
+        throw new Exception( BaseMessages.getString( PKG, "PurRepository.FailedLogin.Message" ), repoException );
+      }
+    } finally {
+      executor.shutdown();
+    }
+  }
+
+  private void syncWebService( String username, String urlEncodedPassword, RepositoryConnectResult result )
+    throws Exception {
+    ExecutorService executor = Executors.newFixedThreadPool(1);
+
+    try{
+      Future<Exception> syncWebserviceFuture = executor.submit( new Callable<Exception>() {
+
+        @Override
+        public Exception call() throws Exception {
+          try {
+            if ( log.isBasic() ) {
+              log.logBasic( BaseMessages.getString( PKG, "PurRepositoryConnector.CreateRepositorySyncWebService.Start" ) );
+            }
+            IRepositorySyncWebService syncWebService =
+              serviceManager.createService( username, urlEncodedPassword, IRepositorySyncWebService.class ); //$NON-NLS-1$
+            if ( log.isBasic() ) {
+              log.logBasic( BaseMessages.getString( PKG, "PurRepositoryConnector.CreateRepositorySyncWebService.Sync" ) ); //$NON-NLS-1$
+            }
+            syncWebService.sync( repositoryMeta.getName(), repositoryMeta.getRepositoryLocation().getUrl() );
+          } catch ( RepositorySyncException e ) {
+            log.logError( e.getMessage(), e );
+            // this message will be presented to the user in spoon
+            result.setConnectMessage( e.getMessage() );
+            return null;
+          } catch ( WebServiceException e ) {
+            // if we can speak to the repository okay but not the sync service, assume we're talking to a BA Server
+            log.logError( e.getMessage(), e );
+            return new Exception( BaseMessages.getString( PKG, "PurRepository.BAServerLogin.Message" ), e );
+          }
+          return null;
+        }
+      } );
+
+      Exception syncException = syncWebserviceFuture.get();
+      if ( syncException != null ) {
+        throw syncException;
+      }
+    } finally {
+      executor.shutdown();
+    }
   }
 
   private static String encodePassword( String decryptedPassword ) throws UnsupportedEncodingException {
